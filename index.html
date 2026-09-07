@@ -243,7 +243,6 @@ main{flex:1; padding:4px 18px 96px;}
   </div>
 
   <main>
-    <div id="debugPanel" style="display:none; background:#1a0000; border:2px solid #ff4444; color:#ffcccc; padding:14px; margin-bottom:16px; border-radius:12px; font-size:11px; white-space:pre-wrap; word-break:break-all; font-family:monospace; user-select:all;"></div>
     <div class="tabs">
       <button class="tab-btn active" data-view="dashboard">Ringkasan</button>
       <button class="tab-btn" data-view="records">Rekod</button>
@@ -391,52 +390,66 @@ function parseAmount(v){
   return f;
 }
 
-// Parse one MONTH tab's raw rows (range A1:N120 -> array index 0 = row1)
-function parseMonthTab(abbr, label, rows){
-  const r = (n)=> rows[n-1] || [];  // 1-indexed row accessor
-  const status = str(r(5)[1]);
-  const lastUpdated = r(5)[8];
+function findRowIdx(rows, matchText){
+  return rows.findIndex(r => str(r[0]) === matchText);
+}
 
+// Parse one MONTH tab's compacted rows (GViz drops entirely-blank rows, so we anchor by label text, not fixed row numbers)
+function parseMonthTab(abbr, label, rows){
+  const statusIdx = findRowIdx(rows, 'MONTH STATUS');
+  const status = statusIdx>=0 ? str(rows[statusIdx][1]) : null;
+  const lastUpdated = statusIdx>=0 ? rows[statusIdx][8] : null;
+
+  const utilHeaderIdx = findRowIdx(rows, 'UTILITIES');
+  const summaryRow = utilHeaderIdx>=0 ? (rows[utilHeaderIdx+1]||[]) : [];
   const summary = {
-    utilities: num(r(8)[0]),
-    fixedBills: num(r(8)[2]),
-    fuel: num(r(8)[4]),
-    other: num(r(8)[6]),
-    touchGo: num(r(8)[8]),
+    utilities: num(summaryRow[0]),
+    fixedBills: num(summaryRow[2]),
+    fuel: num(summaryRow[4]),
+    other: num(summaryRow[6]),
+    touchGo: num(summaryRow[8]),
   };
 
   const expenses = [];
   const fuel = [];
   const tg = [];
-  for(let row=14; row<=24; row++){
-    const c = r(row);
-    const category = str(c[0]);
-    const amtExp = parseAmount(c[2]);
-    if(category && (amtExp!==null || str(c[5]))){
-      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+  const catHeaderIdx = findRowIdx(rows, 'Category');
+  const erpSectionIdx = findRowIdx(rows, 'ERP (DIRECT + INDIRECT) - EXPENSE DETAILS');
+  if(catHeaderIdx>=0){
+    const endIdx = erpSectionIdx>=0 ? erpSectionIdx : rows.length;
+    for(let i=catHeaderIdx+1; i<endIdx; i++){
+      const c = rows[i] || [];
+      const category = str(c[0]);
+      const amtExp = parseAmount(c[2]);
+      if(category && (amtExp!==null || str(c[5]))){
+        expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+      }
+      const vehicleF = str(c[7]);
+      const amtF = parseAmount(c[8]);
+      if(vehicleF && amtF>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:amtF });
+      const vehicleT = str(c[10]);
+      const amtT = parseAmount(c[11]);
+      if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
     }
-    const vehicleF = str(c[7]);
-    const amtF = parseAmount(c[8]);
-    if(vehicleF && amtF>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:amtF });
-    const vehicleT = str(c[10]);
-    const amtT = parseAmount(c[11]);
-    if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
   }
 
   const erp = [];
   let directTotal = 0, indirectTotal = 0;
-  for(let row=29; row<=110; row++){
-    const c = r(row);
-    const no = c[0];
-    if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
-    const isValidNo = no !== null && no !== undefined && String(no).trim() !== '';
-    if(!isValidNo) continue;
-    const amount = parseAmount(c[6]);
-    const erpType = str(c[8]);
-    const erpTypeUp = erpType ? erpType.toUpperCase() : '';
-    if(erpTypeUp==='DIRECT') directTotal += (amount||0);
-    else if(erpTypeUp==='INDIRECT') indirectTotal += (amount||0);
-    erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
+  if(erpSectionIdx>=0){
+    // erpSectionIdx = section title row; erpSectionIdx+1 = column-header row; data starts at +2
+    for(let i=erpSectionIdx+2; i<rows.length; i++){
+      const c = rows[i] || [];
+      const no = c[0];
+      if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
+      const isValidNo = no !== null && no !== undefined && String(no).trim() !== '';
+      if(!isValidNo) continue;
+      const amount = parseAmount(c[6]);
+      const erpType = str(c[8]);
+      const erpTypeUp = erpType ? erpType.toUpperCase() : '';
+      if(erpTypeUp==='DIRECT') directTotal += (amount||0);
+      else if(erpTypeUp==='INDIRECT') indirectTotal += (amount||0);
+      erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
+    }
   }
 
   summary.directErp = directTotal;
@@ -466,22 +479,6 @@ async function loadAllData(){
     const results = await Promise.all(
       MONTH_ORDER.map(abbr => fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A1:N120').then(rows => parseMonthTab(abbr, MONTH_LABEL[abbr], rows)))
     );
-
-    // ---- TEMP DEBUG: capture raw JAN row8 + row29 for on-screen inspection ----
-    try{
-      const janRaw = await fetchRangeJSONP('JAN', 'A1:N120');
-      window.__DEBUG_JAN_ROW8 = janRaw[7];
-      window.__DEBUG_JAN_ROW29 = janRaw[28];
-      window.__DEBUG_JAN_ROWCOUNT = janRaw.length;
-      const dbgEl = document.getElementById('debugPanel');
-      if(dbgEl){
-        dbgEl.style.display = 'block';
-        dbgEl.textContent = 'JAN row8: ' + JSON.stringify(janRaw[7]) + '\\n\\nJAN row29: ' + JSON.stringify(janRaw[28]) + '\\n\\nTotal rows returned: ' + janRaw.length;
-      }
-    }catch(dbgErr){
-      const dbgEl = document.getElementById('debugPanel');
-      if(dbgEl){ dbgEl.style.display='block'; dbgEl.textContent = 'DEBUG FETCH ERROR: ' + dbgErr.message; }
-    }
 
     const monthly = results.map(m => ({
       Month: m.abbr, MonthLabel: m.label,
