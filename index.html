@@ -318,9 +318,10 @@ main{flex:1; padding:4px 18px 96px;}
 <div class="toast" id="toast"></div>
 
 <script>
-const SHEET_ID = "1CjFO0d0TcuybgXl6C-bztV0r3uFeFnWHJIZ59D-GAMc";
+const SHEET_ID = "1u20wA2DU6uKKiETnjzV5axTEyxe3zxsgsu_pP0tyHLk";
 const MONTH_ORDER = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 const MONTH_LABEL = {"JAN": "Januari", "FEB": "Februari", "MAR": "Mac", "APR": "April", "MAY": "Mei", "JUN": "Jun", "JUL": "Julai", "AUG": "Ogos", "SEP": "September", "OCT": "Oktober", "NOV": "November", "DEC": "Disember"};
+const SHEET_TAB_NAME = {JAN:'JAN',FEB:'FEB',MAR:'MAR',APR:'APR',MAY:'MAY',JUN:'JUNE',JUL:'JULY',AUG:'AUG',SEP:'SEP',OCT:'OCT',NOV:'NOV',DEC:'DEC'};
 
 let DATA = { summary:null, monthly:[], categories:[], expenses:[], fuel:[], tg:[], erp:[] };
 let currentMonth = null;
@@ -343,43 +344,99 @@ function showToast(msg){
   setTimeout(()=>t.classList.remove('show'), 2600);
 }
 
-// ---- JSONP fetch from Google Sheets (published live sheet) ----
-function fetchSheetJSONP(sheetName, timeoutMs=12000){
+// ---- JSONP fetch from Google Sheets: raw positional range (headers=0) ----
+function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
   return new Promise((resolve, reject)=>{
     const cbName = 'gvizCB_' + sheetName.replace(/[^a-zA-Z0-9]/g,'') + '_' + Math.floor(Math.random()*1e9);
     const script = document.createElement('script');
     let done = false;
-    const timer = setTimeout(()=>{
-      if(!done){ done=true; cleanup(); reject(new Error('timeout')); }
-    }, timeoutMs);
-    function cleanup(){
-      clearTimeout(timer);
-      delete window[cbName];
-      if(script.parentNode) script.parentNode.removeChild(script);
-    }
+    const timer = setTimeout(()=>{ if(!done){ done=true; cleanup(); reject(new Error('timeout')); } }, timeoutMs);
+    function cleanup(){ clearTimeout(timer); delete window[cbName]; if(script.parentNode) script.parentNode.removeChild(script); }
     window[cbName] = function(json){
       if(done) return;
       done = true;
       cleanup();
       try{
         if(!json || !json.table){ reject(new Error('bad response')); return; }
-        const cols = json.table.cols.map(c => c.label || c.id || '');
+        const numCols = json.table.cols.length;
         const rows = (json.table.rows||[]).map(r=>{
-          const obj = {};
-          cols.forEach((col,i)=>{
-            const cell = r.c[i];
-            obj[col] = cell ? cell.v : null;
-          });
-          return obj;
+          const arr = new Array(numCols).fill(null);
+          (r.c||[]).forEach((cell,i)=>{ arr[i] = cell ? cell.v : null; });
+          return arr;
         });
         resolve(rows);
       }catch(e){ reject(e); }
     };
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&headers=1&_=${Date.now()}`;
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&range=${encodeURIComponent(range)}&headers=0&_=${Date.now()}`;
     script.src = url;
     script.onerror = ()=>{ if(!done){ done=true; cleanup(); reject(new Error('script load error')); } };
     document.body.appendChild(script);
   });
+}
+
+function num(v){ return (typeof v === 'number') ? v : 0; }
+function str(v){ return (v===null||v===undefined) ? null : String(v).trim(); }
+
+// Parse one MONTH tab's raw rows (range A1:N120 -> array index 0 = row1)
+function parseMonthTab(abbr, label, rows){
+  const r = (n)=> rows[n-1] || [];  // 1-indexed row accessor
+  const status = str(r(5)[1]);
+  const lastUpdated = r(5)[8];
+
+  const summary = {
+    utilities: num(r(8)[0]),
+    fixedBills: num(r(8)[2]),
+    fuel: num(r(8)[4]),
+    other: num(r(8)[6]),
+    touchGo: num(r(8)[8]),
+  };
+
+  const expenses = [];
+  const fuel = [];
+  const tg = [];
+  for(let row=14; row<=24; row++){
+    const c = r(row);
+    const category = str(c[0]);
+    if(category && (typeof c[2]==='number' || str(c[5]))){
+      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: typeof c[2]==='number'?c[2]:null, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+    }
+    const vehicleF = str(c[7]);
+    if(vehicleF && typeof c[8]==='number' && c[8]>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:c[8] });
+    const vehicleT = str(c[10]);
+    if(vehicleT && typeof c[11]==='number' && c[11]>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:c[11] });
+  }
+
+  const erp = [];
+  let directTotal = 0, indirectTotal = 0;
+  for(let row=29; row<=110; row++){
+    const c = r(row);
+    const no = c[0];
+    if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
+    const isValidNo = (typeof no === 'number') || (typeof no === 'string' && /^\d+(\.\d+)?$/.test(no.trim()));
+    if(!isValidNo) continue;
+    const amount = typeof c[6]==='number' ? c[6] : null;
+    const erpType = str(c[8]);
+    if(erpType==='DIRECT') directTotal += (amount||0);
+    else if(erpType==='INDIRECT') indirectTotal += (amount||0);
+    erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
+  }
+
+  summary.directErp = directTotal;
+  summary.indirectErp = indirectTotal;
+  summary.total = summary.utilities+summary.fixedBills+summary.fuel+summary.other+summary.touchGo+directTotal+indirectTotal;
+
+  return { abbr, label, status, lastUpdated, summary, expenses, fuel, tg, erp };
+}
+
+function mapStatus(raw){
+  const s = (raw||'').toUpperCase();
+  if(s.includes('BELUM') || s.includes('NOT ENTERED')) return 'NOT ENTERED';
+  if(s.includes('PERLU SEMAKAN') || s.includes('REVIEW')) return 'REVIEW REQUIRED';
+  if(s.includes('KEMAS KINI') || s.includes('UPDATING')) return 'UPDATING';
+  if(s.includes('LENGKAP') || s.includes('COMPLETE')) return 'COMPLETE';
+  if(s.includes('INDIRECT ONLY')) return 'INDIRECT ONLY';
+  if(s.includes('DIRECT ONLY')) return 'DIRECT ONLY';
+  return raw || 'NOT ENTERED';
 }
 
 async function loadAllData(){
@@ -388,22 +445,37 @@ async function loadAllData(){
   dot.className = 'dot loading';
   txt.textContent = 'Menyegarkan…';
   try{
-    const [summary, monthly, categories, expenses, fuel, tg, erp] = await Promise.all([
-      fetchSheetJSONP('Summary'),
-      fetchSheetJSONP('MonthlySummary'),
-      fetchSheetJSONP('CategoryTotals'),
-      fetchSheetJSONP('Expenses'),
-      fetchSheetJSONP('Fuel'),
-      fetchSheetJSONP('TouchGo'),
-      fetchSheetJSONP('ERP'),
-    ]);
-    DATA.summary = summary[0] || {};
+    const results = await Promise.all(
+      MONTH_ORDER.map(abbr => fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A1:N120').then(rows => parseMonthTab(abbr, MONTH_LABEL[abbr], rows)))
+    );
+
+    const monthly = results.map(m => ({
+      Month: m.abbr, MonthLabel: m.label,
+      Utilities: m.summary.utilities, FixedBills: m.summary.fixedBills, Fuel: m.summary.fuel,
+      Other: m.summary.other, TouchGo: m.summary.touchGo,
+      DirectERP: m.summary.directErp, IndirectERP: m.summary.indirectErp,
+      Total: m.summary.total, Status: mapStatus(m.status), LastUpdated: m.lastUpdated,
+    }));
+
+    const ytdTotal = monthly.reduce((s,m)=>s+m.Total,0);
+    const monthsWithTotal = monthly.filter(m=>m.Total>0);
+    const average = monthsWithTotal.length ? ytdTotal/monthsWithTotal.length : 0;
+    const highest = monthly.reduce((a,b)=> b.Total>a.Total?b:a, monthly[0]);
+
+    const catSums = {Utilities:0,'Fixed Bills':0,Fuel:0,Other:0,'Touch & Go':0,'Direct ERP':0,'Indirect ERP':0};
+    monthly.forEach(m=>{
+      catSums['Utilities'] += m.Utilities; catSums['Fixed Bills'] += m.FixedBills; catSums['Fuel'] += m.Fuel;
+      catSums['Other'] += m.Other; catSums['Touch & Go'] += m.TouchGo;
+      catSums['Direct ERP'] += m.DirectERP; catSums['Indirect ERP'] += m.IndirectERP;
+    });
+
+    DATA.summary = { YTD_Total: ytdTotal, Average: average, Highest_Monthly_Cost: highest.Total, Highest_Month: highest.Month };
     DATA.monthly = monthly;
-    DATA.categories = categories;
-    DATA.expenses = expenses;
-    DATA.fuel = fuel;
-    DATA.tg = tg;
-    DATA.erp = erp;
+    DATA.categories = Object.entries(catSums).map(([Category,Total])=>({Category,Total}));
+    DATA.expenses = results.flatMap(m=>m.expenses);
+    DATA.fuel = results.flatMap(m=>m.fuel);
+    DATA.tg = results.flatMap(m=>m.tg);
+    DATA.erp = results.flatMap(m=>m.erp);
 
     dot.className = 'dot';
     const now = new Date();
@@ -415,11 +487,7 @@ async function loadAllData(){
     dot.className = 'dot err';
     txt.textContent = 'Gagal menyambung — cuba segarkan semula';
     document.getElementById('loadingText').textContent = 'Tidak dapat memuatkan data. Pastikan Google Sheet dikongsi sebagai "Sesiapa yang ada pautan".';
-    if(DATA.monthly.length === 0){
-      // keep overlay with error message, add retry affordance via button already visible
-    } else {
-      document.getElementById('loadingOverlay').style.display = 'none';
-    }
+    if(DATA.monthly.length){ document.getElementById('loadingOverlay').style.display = 'none'; }
   }
 }
 
