@@ -344,7 +344,8 @@ function showToast(msg){
   setTimeout(()=>t.classList.remove('show'), 2600);
 }
 
-// ---- JSONP fetch from Google Sheets: raw positional range (headers=0) ----
+// ---- JSONP fetch from Google Sheets: explicit column SELECT (guarantees fixed column count/order) ----
+const FETCH_COLS = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N'];
 function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
   return new Promise((resolve, reject)=>{
     const cbName = 'gvizCB_' + sheetName.replace(/[^a-zA-Z0-9]/g,'') + '_' + Math.floor(Math.random()*1e9);
@@ -358,7 +359,7 @@ function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
       cleanup();
       try{
         if(!json || !json.table){ reject(new Error('bad response')); return; }
-        const numCols = json.table.cols.length;
+        const numCols = FETCH_COLS.length;
         const rows = (json.table.rows||[]).map(r=>{
           const arr = new Array(numCols).fill(null);
           (r.c||[]).forEach((cell,i)=>{ arr[i] = cell ? cell.v : null; });
@@ -367,7 +368,8 @@ function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
         resolve(rows);
       }catch(e){ reject(e); }
     };
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&range=${encodeURIComponent(range)}&headers=0&_=${Date.now()}`;
+    const tq = 'select ' + FETCH_COLS.join(',') + ' limit 130';
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&tq=${encodeURIComponent(tq)}&headers=0&_=${Date.now()}`;
     script.src = url;
     script.onerror = ()=>{ if(!done){ done=true; cleanup(); reject(new Error('script load error')); } };
     document.body.appendChild(script);
