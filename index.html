@@ -374,8 +374,17 @@ function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
   });
 }
 
-function num(v){ return (typeof v === 'number') ? v : 0; }
+function num(v){ const p = parseAmount(v); return p===null ? 0 : p; }
 function str(v){ return (v===null||v===undefined) ? null : String(v).trim(); }
+function parseAmount(v){
+  if(v===null||v===undefined) return null;
+  if(typeof v==='number') return v;
+  const s = String(v).trim();
+  if(s===''||s==='-') return null;
+  const cleaned = s.replace(/RM/gi,'').replace(/,/g,'').trim();
+  const f = parseFloat(cleaned);
+  return isNaN(f) ? null : f;
+}
 
 // Parse one MONTH tab's raw rows (range A1:N120 -> array index 0 = row1)
 function parseMonthTab(abbr, label, rows){
@@ -397,13 +406,16 @@ function parseMonthTab(abbr, label, rows){
   for(let row=14; row<=24; row++){
     const c = r(row);
     const category = str(c[0]);
-    if(category && (typeof c[2]==='number' || str(c[5]))){
-      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: typeof c[2]==='number'?c[2]:null, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+    const amtExp = parseAmount(c[2]);
+    if(category && (amtExp!==null || str(c[5]))){
+      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
     }
     const vehicleF = str(c[7]);
-    if(vehicleF && typeof c[8]==='number' && c[8]>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:c[8] });
+    const amtF = parseAmount(c[8]);
+    if(vehicleF && amtF>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:amtF });
     const vehicleT = str(c[10]);
-    if(vehicleT && typeof c[11]==='number' && c[11]>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:c[11] });
+    const amtT = parseAmount(c[11]);
+    if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
   }
 
   const erp = [];
@@ -412,12 +424,13 @@ function parseMonthTab(abbr, label, rows){
     const c = r(row);
     const no = c[0];
     if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
-    const isValidNo = (typeof no === 'number') || (typeof no === 'string' && /^\d+(\.\d+)?$/.test(no.trim()));
+    const isValidNo = no !== null && no !== undefined && String(no).trim() !== '';
     if(!isValidNo) continue;
-    const amount = typeof c[6]==='number' ? c[6] : null;
+    const amount = parseAmount(c[6]);
     const erpType = str(c[8]);
-    if(erpType==='DIRECT') directTotal += (amount||0);
-    else if(erpType==='INDIRECT') indirectTotal += (amount||0);
+    const erpTypeUp = erpType ? erpType.toUpperCase() : '';
+    if(erpTypeUp==='DIRECT') directTotal += (amount||0);
+    else if(erpTypeUp==='INDIRECT') indirectTotal += (amount||0);
     erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
   }
 
