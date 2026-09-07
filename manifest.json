@@ -1,6 +1,6 @@
 {
-  "name": "DXN DC Sendayan - Kos Bulanan",
-  "short_name": "Kos Bulanan",
+  "name": "Management DC Sendayan",
+  "short_name": "Management DC",
   "description": "App live kos bulanan DXN Biotech Consultants DC Sendayan, live-sync dari Google Sheets",
   "start_url": "./index.html",
   "scope": "./",
