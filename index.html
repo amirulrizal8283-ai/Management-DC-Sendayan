@@ -243,7 +243,6 @@ main{flex:1; padding:4px 18px 96px;}
   </div>
 
   <main>
-    <div id="debugPanel" style="display:none; background:#1a0000; border:2px solid #ff4444; color:#ffcccc; padding:14px; margin-bottom:16px; border-radius:12px; font-size:11px; white-space:pre-wrap; word-break:break-all; font-family:monospace; user-select:all;"></div>
     <div class="tabs">
       <button class="tab-btn active" data-view="dashboard">Ringkasan</button>
       <button class="tab-btn" data-view="records">Rekod</button>
@@ -401,25 +400,26 @@ function parseMonthTab(abbr, label, statusRows, expenseRows, erpRawRows){
   const status = statusIdx>=0 ? str(statusRows[statusIdx][1]) : null;
   const lastUpdated = statusIdx>=0 ? statusRows[statusIdx][8] : null;
 
-  const utilHeaderIdx = findRowIdx(statusRows, 'UTILITIES');
-  const summaryRow = utilHeaderIdx>=0 ? (statusRows[utilHeaderIdx+1]||[]) : [];
-  const summary = {
-    utilities: num(summaryRow[0]),
-    fixedBills: num(summaryRow[2]),
-    fuel: num(summaryRow[4]),
-    other: num(summaryRow[6]),
-    touchGo: num(summaryRow[8]),
+  const CAT_BUCKET = {
+    'WATER CONSUMPTION':'utilities', 'ELECTRICITY CONSUMPTION':'utilities',
+    'TELEPHONE BILLS':'fixedBills', 'INTERNET BILLS':'fixedBills', 'HOSTEL RENTAL':'fixedBills',
+    'COURIER CHARGES':'other', 'STATIONERY / OFFICE USED EXPENSES':'other', 'ADDITIONAL COST':'other',
   };
 
   const expenses = [];
   const fuel = [];
   const tg = [];
+  const bucket = {utilities:0, fixedBills:0, other:0};
   for(const raw of expenseRows){
     const c = raw || [];
     const category = str(c[0]);
     const amtExp = parseAmount(c[2]);
-    if(category && (amtExp!==null || str(c[5]))){
-      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+    if(category){
+      if(amtExp!==null || str(c[5])){
+        expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
+      }
+      const key = CAT_BUCKET[category.trim().toUpperCase()] || 'other';
+      bucket[key] += (amtExp || 0);
     }
     const vehicleF = str(c[7]);
     const amtF = parseAmount(c[8]);
@@ -429,10 +429,32 @@ function parseMonthTab(abbr, label, statusRows, expenseRows, erpRawRows){
     if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
   }
 
+  // Utilities/FixedBills/Other computed bottom-up from the expense table itself (Category text is
+  // string-dominant in that column so it survives GViz's type inference reliably). Fall back to the
+  // merged summary row's own value only if bottom-up finds nothing at all for a bucket.
+  const summaryRowFallback = (()=>{
+    const utilHeaderIdx = findRowIdx(statusRows, 'UTILITIES');
+    return utilHeaderIdx>=0 ? (statusRows[utilHeaderIdx+1]||[]) : [];
+  })();
+  const summary = {
+    utilities: bucket.utilities || num(summaryRowFallback[0]),
+    fixedBills: bucket.fixedBills || num(summaryRowFallback[2]),
+    fuel: fuel.reduce((s,f)=>s+f.Amount,0) || num(summaryRowFallback[4]),
+    other: bucket.other || num(summaryRowFallback[6]),
+    touchGo: tg.reduce((s,t)=>s+t.Amount,0) || num(summaryRowFallback[8]),
+  };
+
   const erp = [];
   let directTotal = 0, indirectTotal = 0;
-  // erpRawRows was fetched starting at row26: idx0=section title, idx1=column headers, idx2+ = data
-  for(let i=2; i<erpRawRows.length; i++){
+  // GViz sometimes nulls the header/title text in columns whose data rows are mostly numbers/dates
+  // (e.g. 'No.' column), which can shift where real data starts. Anchor on the literal first
+  // entry number (1) instead of assuming a fixed header-row skip count.
+  let dataStartIdx = erpRawRows.findIndex(r => {
+    const v = r[0];
+    return v === 1 || v === '1' || (typeof v === 'string' && v.trim() === '1');
+  });
+  if(dataStartIdx === -1) dataStartIdx = 2; // no entries found (e.g. month not started yet) -> fall back
+  for(let i=dataStartIdx; i<erpRawRows.length; i++){
     const c = erpRawRows[i] || [];
     const no = c[0];
     if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
@@ -494,28 +516,6 @@ async function loadAllData(){
       await sleep(120); // stagger request start so we don't fire 12 at once
     }
     const settled = await Promise.all(results);
-
-    // ---- TEMP DEBUG: per-month ERP-block diagnostics (the block still most likely to glitch) ----
-    try{
-      const dbgLines = [];
-      for(let i=0;i<MONTH_ORDER.length;i++){
-        const abbr = MONTH_ORDER[i];
-        const erpRaw = await fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A26:N130');
-        const total = settled[i].summary.total;
-        const erpCount = settled[i].erp.length;
-        let extra = '';
-        if(erpRaw.length>0 && (erpRaw[0][0]===null || erpCount===0 && erpRaw.length>2)){
-          extra = ' | FIRST4=' + JSON.stringify(erpRaw.slice(0,4));
-        }
-        dbgLines.push(`${abbr}: erpRows=${erpRaw.length} parsedErpCount=${erpCount} total=${total}${extra}`);
-        await sleep(80);
-      }
-      const dbgEl = document.getElementById('debugPanel');
-      if(dbgEl){ dbgEl.style.display='block'; dbgEl.textContent = dbgLines.join('\\n'); }
-    }catch(dbgErr){
-      const dbgEl = document.getElementById('debugPanel');
-      if(dbgEl){ dbgEl.style.display='block'; dbgEl.textContent = 'DEBUG ERROR: '+dbgErr.message; }
-    }
 
     const monthly = settled.map(m => ({
       Month: m.abbr, MonthLabel: m.label,
