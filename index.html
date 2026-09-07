@@ -509,7 +509,11 @@ async function loadAllData(){
         const cIdx = findRowIdx(rawRows,'Category');
         const eIdx = findRowIdx(rawRows,'ERP (DIRECT + INDIRECT) - EXPENSE DETAILS');
         const total = settled[i].summary.total;
-        dbgLines.push(`${abbr}: rows=${rawRows.length} status@${sIdx} util@${uIdx} cat@${cIdx} erp@${eIdx} => total=${total}`);
+        let extra = '';
+        if(sIdx===-1){
+          extra = ' | FIRST5=' + JSON.stringify(rawRows.slice(0,5));
+        }
+        dbgLines.push(`${abbr}: rows=${rawRows.length} status@${sIdx} util@${uIdx} cat@${cIdx} erp@${eIdx} => total=${total}${extra}`);
         await sleep(80);
       }
       const dbgEl = document.getElementById('debugPanel');
