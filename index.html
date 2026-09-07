@@ -345,7 +345,7 @@ function showToast(msg){
   setTimeout(()=>t.classList.remove('show'), 2600);
 }
 
-// ---- JSONP fetch from Google Sheets: explicit column SELECT (guarantees fixed column count/order) ----
+// ---- JSONP fetch from Google Sheets: explicit range + column SELECT (fixed column count/order) ----
 const FETCH_COLS = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N'];
 function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
   return new Promise((resolve, reject)=>{
@@ -369,8 +369,7 @@ function fetchRangeJSONP(sheetName, range, timeoutMs=15000){
         resolve(rows);
       }catch(e){ reject(e); }
     };
-    const tq = 'select ' + FETCH_COLS.join(',') + ' limit 130';
-    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&tq=${encodeURIComponent(tq)}&headers=0&_=${Date.now()}`;
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(sheetName)}&range=${encodeURIComponent(range)}&headers=0&_=${Date.now()}`;
     script.src = url;
     script.onerror = ()=>{ if(!done){ done=true; cleanup(); reject(new Error('script load error')); } };
     document.body.appendChild(script);
@@ -395,14 +394,15 @@ function findRowIdx(rows, matchText){
   return rows.findIndex(r => str(r[0]) === matchText);
 }
 
-// Parse one MONTH tab's compacted rows (GViz drops entirely-blank rows, so we anchor by label text, not fixed row numbers)
-function parseMonthTab(abbr, label, rows){
-  const statusIdx = findRowIdx(rows, 'MONTH STATUS');
-  const status = statusIdx>=0 ? str(rows[statusIdx][1]) : null;
-  const lastUpdated = statusIdx>=0 ? rows[statusIdx][8] : null;
+// Parse one month using 3 separately-fetched narrow ranges (smaller/more homogeneous requests
+// are more resilient to Google's automatic column type-inference glitches on large mixed sheets)
+function parseMonthTab(abbr, label, statusRows, expenseRows, erpRawRows){
+  const statusIdx = findRowIdx(statusRows, 'MONTH STATUS');
+  const status = statusIdx>=0 ? str(statusRows[statusIdx][1]) : null;
+  const lastUpdated = statusIdx>=0 ? statusRows[statusIdx][8] : null;
 
-  const utilHeaderIdx = findRowIdx(rows, 'UTILITIES');
-  const summaryRow = utilHeaderIdx>=0 ? (rows[utilHeaderIdx+1]||[]) : [];
+  const utilHeaderIdx = findRowIdx(statusRows, 'UTILITIES');
+  const summaryRow = utilHeaderIdx>=0 ? (statusRows[utilHeaderIdx+1]||[]) : [];
   const summary = {
     utilities: num(summaryRow[0]),
     fixedBills: num(summaryRow[2]),
@@ -414,43 +414,36 @@ function parseMonthTab(abbr, label, rows){
   const expenses = [];
   const fuel = [];
   const tg = [];
-  const catHeaderIdx = findRowIdx(rows, 'Category');
-  const erpSectionIdx = findRowIdx(rows, 'ERP (DIRECT + INDIRECT) - EXPENSE DETAILS');
-  if(catHeaderIdx>=0){
-    const endIdx = erpSectionIdx>=0 ? erpSectionIdx : rows.length;
-    for(let i=catHeaderIdx+1; i<endIdx; i++){
-      const c = rows[i] || [];
-      const category = str(c[0]);
-      const amtExp = parseAmount(c[2]);
-      if(category && (amtExp!==null || str(c[5]))){
-        expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
-      }
-      const vehicleF = str(c[7]);
-      const amtF = parseAmount(c[8]);
-      if(vehicleF && amtF>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:amtF });
-      const vehicleT = str(c[10]);
-      const amtT = parseAmount(c[11]);
-      if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
+  for(const raw of expenseRows){
+    const c = raw || [];
+    const category = str(c[0]);
+    const amtExp = parseAmount(c[2]);
+    if(category && (amtExp!==null || str(c[5]))){
+      expenses.push({ Month:abbr, Category:category, LocationSupplier:str(c[1]), Amount: amtExp, BillingPeriod:str(c[3]), AccountRef:str(c[4]), Remarks:str(c[5]) });
     }
+    const vehicleF = str(c[7]);
+    const amtF = parseAmount(c[8]);
+    if(vehicleF && amtF>0) fuel.push({ Month:abbr, Vehicle:vehicleF, Amount:amtF });
+    const vehicleT = str(c[10]);
+    const amtT = parseAmount(c[11]);
+    if(vehicleT && amtT>0) tg.push({ Month:abbr, Vehicle:vehicleT, Amount:amtT });
   }
 
   const erp = [];
   let directTotal = 0, indirectTotal = 0;
-  if(erpSectionIdx>=0){
-    // erpSectionIdx = section title row; erpSectionIdx+1 = column-header row; data starts at +2
-    for(let i=erpSectionIdx+2; i<rows.length; i++){
-      const c = rows[i] || [];
-      const no = c[0];
-      if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
-      const isValidNo = no !== null && no !== undefined && String(no).trim() !== '';
-      if(!isValidNo) continue;
-      const amount = parseAmount(c[6]);
-      const erpType = str(c[8]);
-      const erpTypeUp = erpType ? erpType.toUpperCase() : '';
-      if(erpTypeUp==='DIRECT') directTotal += (amount||0);
-      else if(erpTypeUp==='INDIRECT') indirectTotal += (amount||0);
-      erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
-    }
+  // erpRawRows was fetched starting at row26: idx0=section title, idx1=column headers, idx2+ = data
+  for(let i=2; i<erpRawRows.length; i++){
+    const c = erpRawRows[i] || [];
+    const no = c[0];
+    if(typeof no === 'string' && no.toUpperCase().includes('TOTAL')) break;
+    const isValidNo = no !== null && no !== undefined && String(no).trim() !== '';
+    if(!isValidNo) continue;
+    const amount = parseAmount(c[6]);
+    const erpType = str(c[8]);
+    const erpTypeUp = erpType ? erpType.toUpperCase() : '';
+    if(erpTypeUp==='DIRECT') directTotal += (amount||0);
+    else if(erpTypeUp==='INDIRECT') indirectTotal += (amount||0);
+    erp.push({ Month:abbr, No:no, ERPDate:str(c[1]), ReceivedDate:str(c[2]), Category:str(c[3]), Description:str(c[4]), Supplier:str(c[5]), Amount:amount, Quantity:c[7], ERPType:erpType, Status:str(c[9]) });
   }
 
   summary.directErp = directTotal;
@@ -474,9 +467,13 @@ function mapStatus(raw){
 function sleep(ms){ return new Promise(res=>setTimeout(res, ms)); }
 
 async function fetchMonthWithRetry(abbr, tabName, label, attempt=0){
-  const rows = await fetchRangeJSONP(tabName, 'A1:N120');
-  const parsed = parseMonthTab(abbr, label, rows);
-  const looksEmpty = rows.length < 5 || findRowIdx(rows, 'MONTH STATUS') === -1;
+  const [statusRows, expenseRows, erpRawRows] = await Promise.all([
+    fetchRangeJSONP(tabName, 'A1:N13'),
+    fetchRangeJSONP(tabName, 'A14:N24'),
+    fetchRangeJSONP(tabName, 'A26:N130'),
+  ]);
+  const parsed = parseMonthTab(abbr, label, statusRows, expenseRows, erpRawRows);
+  const looksEmpty = findRowIdx(statusRows, 'MONTH STATUS') === -1;
   if(looksEmpty && attempt < 3){
     await sleep(400 + attempt*400);
     return fetchMonthWithRetry(abbr, tabName, label, attempt+1);
@@ -498,22 +495,19 @@ async function loadAllData(){
     }
     const settled = await Promise.all(results);
 
-    // ---- TEMP DEBUG: per-month anchor diagnostics ----
+    // ---- TEMP DEBUG: per-month ERP-block diagnostics (the block still most likely to glitch) ----
     try{
       const dbgLines = [];
       for(let i=0;i<MONTH_ORDER.length;i++){
         const abbr = MONTH_ORDER[i];
-        const rawRows = await fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A1:N120');
-        const sIdx = findRowIdx(rawRows,'MONTH STATUS');
-        const uIdx = findRowIdx(rawRows,'UTILITIES');
-        const cIdx = findRowIdx(rawRows,'Category');
-        const eIdx = findRowIdx(rawRows,'ERP (DIRECT + INDIRECT) - EXPENSE DETAILS');
+        const erpRaw = await fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A26:N130');
         const total = settled[i].summary.total;
+        const erpCount = settled[i].erp.length;
         let extra = '';
-        if(sIdx===-1){
-          extra = ' | FIRST5=' + JSON.stringify(rawRows.slice(0,5));
+        if(erpRaw.length>0 && (erpRaw[0][0]===null || erpCount===0 && erpRaw.length>2)){
+          extra = ' | FIRST4=' + JSON.stringify(erpRaw.slice(0,4));
         }
-        dbgLines.push(`${abbr}: rows=${rawRows.length} status@${sIdx} util@${uIdx} cat@${cIdx} erp@${eIdx} => total=${total}${extra}`);
+        dbgLines.push(`${abbr}: erpRows=${erpRaw.length} parsedErpCount=${erpCount} total=${total}${extra}`);
         await sleep(80);
       }
       const dbgEl = document.getElementById('debugPanel');
