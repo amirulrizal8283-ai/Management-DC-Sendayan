@@ -470,17 +470,34 @@ function mapStatus(raw){
   return raw || 'NOT ENTERED';
 }
 
+function sleep(ms){ return new Promise(res=>setTimeout(res, ms)); }
+
+async function fetchMonthWithRetry(abbr, tabName, label, attempt=0){
+  const rows = await fetchRangeJSONP(tabName, 'A1:N120');
+  const parsed = parseMonthTab(abbr, label, rows);
+  const looksEmpty = rows.length < 5 || findRowIdx(rows, 'MONTH STATUS') === -1;
+  if(looksEmpty && attempt < 3){
+    await sleep(400 + attempt*400);
+    return fetchMonthWithRetry(abbr, tabName, label, attempt+1);
+  }
+  return parsed;
+}
+
 async function loadAllData(){
   const dot = document.getElementById('syncDot');
   const txt = document.getElementById('syncText');
   dot.className = 'dot loading';
   txt.textContent = 'Menyegarkan…';
   try{
-    const results = await Promise.all(
-      MONTH_ORDER.map(abbr => fetchRangeJSONP(SHEET_TAB_NAME[abbr], 'A1:N120').then(rows => parseMonthTab(abbr, MONTH_LABEL[abbr], rows)))
-    );
+    const results = [];
+    for(let i=0; i<MONTH_ORDER.length; i++){
+      const abbr = MONTH_ORDER[i];
+      results.push(fetchMonthWithRetry(abbr, SHEET_TAB_NAME[abbr], MONTH_LABEL[abbr]));
+      await sleep(120); // stagger request start so we don't fire 12 at once
+    }
+    const settled = await Promise.all(results);
 
-    const monthly = results.map(m => ({
+    const monthly = settled.map(m => ({
       Month: m.abbr, MonthLabel: m.label,
       Utilities: m.summary.utilities, FixedBills: m.summary.fixedBills, Fuel: m.summary.fuel,
       Other: m.summary.other, TouchGo: m.summary.touchGo,
@@ -503,10 +520,10 @@ async function loadAllData(){
     DATA.summary = { YTD_Total: ytdTotal, Average: average, Highest_Monthly_Cost: highest.Total, Highest_Month: highest.Month };
     DATA.monthly = monthly;
     DATA.categories = Object.entries(catSums).map(([Category,Total])=>({Category,Total}));
-    DATA.expenses = results.flatMap(m=>m.expenses);
-    DATA.fuel = results.flatMap(m=>m.fuel);
-    DATA.tg = results.flatMap(m=>m.tg);
-    DATA.erp = results.flatMap(m=>m.erp);
+    DATA.expenses = settled.flatMap(m=>m.expenses);
+    DATA.fuel = settled.flatMap(m=>m.fuel);
+    DATA.tg = settled.flatMap(m=>m.tg);
+    DATA.erp = settled.flatMap(m=>m.erp);
 
     dot.className = 'dot';
     const now = new Date();
